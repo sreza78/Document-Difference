@@ -1,0 +1,21 @@
+{
+  "name": "DocumentDifference",
+  "version": "1.0.0",
+  "description": "Generates difference of two html document",
+  "main": "build/index.js",
+  "author": "S.REZA",
+  "license": "MIT",
+  "scripts": {
+    "build": "babel src -d build --copy-files",
+    "prepare": "yarn run build"
+  },
+  "dependencies": {
+    "react": "^17.0.2"
+  },
+  "devDependencies": {
+    "babel-cli": "^6.26.0",
+    "babel-preset-env": "^1.7.0",
+    "babel-preset-react": "^6.24.1",
+    "babel-preset-stage-0": "^6.24.1"
+  }
+}
