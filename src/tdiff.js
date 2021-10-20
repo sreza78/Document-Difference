@@ -335,9 +335,8 @@
   
     tdiff = function(before, after) {
       var ops;
-      if (before === after) {
-        return before;
-      }
+      if(!before || !after) return '';
+      if (before === after) return before;
       before = html_to_tokens(before);
       after = html_to_tokens(after);
       ops = calculate_operations(before, after);
