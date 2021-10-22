@@ -1,361 +1,896 @@
-(function() {
-    var Match, calculate_operations, consecutive_where, create_index, tdiff, find_match, find_matching_blocks, html_to_tokens, is_end_of_tag, is_start_of_tag, is_tag, is_whitespace, isnt_tag, op_map, recursively_find_matching_blocks, render_operations, wrap;
-  
-    is_end_of_tag = function(char) {
+(function(){
+
+  function isEndOfTag(char){
       return char === '>';
-    };
-  
-    is_start_of_tag = function(char) {
+  }
+
+  function isStartOfTag(char){
       return char === '<';
-    };
-  
-    is_whitespace = function(char) {
+  }
+
+  function isWhitespace(char){
       return /^\s+$/.test(char);
-    };
-  
-    is_tag = function(token) {
-      return /^\s*<[^>]+>\s*$/.test(token);
-    };
-  
-    isnt_tag = function(token) {
-      return !is_tag(token);
-    };
-  
-    Match = (function() {
-      function Match(start_in_before1, start_in_after1, length1) {
-        this.start_in_before = start_in_before1;
-        this.start_in_after = start_in_after1;
-        this.length = length1;
-        this.end_in_before = (this.start_in_before + this.length) - 1;
-        this.end_in_after = (this.start_in_after + this.length) - 1;
+  }
+
+  /**
+   * Determines if the given token is a tag.
+   *
+   * @param {string} token The token in question.
+   *
+   * @return {boolean|string} False if the token is not a tag, or the tag name otherwise.
+   */
+  function isTag(token){
+      var match = token.match(/^\s*<([^!>][^>]*)>\s*$/);
+      return !!match && match[1].trim().split(' ')[0];
+  }
+
+  function isntTag(token){
+      return !isTag(token);
+  }
+
+  function isStartofHTMLComment(word){
+      return /^<!--/.test(word);
+  }
+
+  function isEndOfHTMLComment(word){
+      return /-->$/.test(word);
+  }
+
+  /**
+   * Checks if the current word is the beginning of an atomic tag. An atomic tag is one whose
+   * child nodes should not be compared - the entire tag should be treated as one token. This
+   * is useful for tags where it does not make sense to insert <ins> and <del> tags.
+   *
+   * @param {string} word The characters of the current token read so far.
+   *
+   * @return {string|null} The name of the atomic tag if the word will be an atomic tag,
+   *    null otherwise
+   */
+  function isStartOfAtomicTag(word){
+      var result = /^<(iframe|object|math|svg|script)/.exec(word);
+      return result && result[1];
+  }
+
+  /**
+   * Checks if the current word is the end of an atomic tag (i.e. it has all the characters,
+   * except for the end bracket of the closing tag, such as '<iframe></iframe').
+   *
+   * @param {string} word The characters of the current token read so far.
+   * @param {string} tag The ending tag to look for.
+   *
+   * @return {boolean} True if the word is now a complete token (including the end tag),
+   *    false otherwise.
+   */
+  function isEndOfAtomicTag(word, tag){
+      return word.substring(word.length - tag.length - 2) === ('</' + tag);
+  }
+
+  /**
+   * Checks if a tag is a void tag.
+   *
+   * @param {string} token The token to check.
+   *
+   * @return {boolean} True if the token is a void tag, false otherwise.
+   */
+  function isVoidTag(token){
+      return /^\s*<[^>]+\/>\s*$/.test(token);
+  }
+
+  /**
+   * Checks if a token can be wrapped inside a tag.
+   *
+   * @param {string} token The token to check.
+   *
+   * @return {boolean} True if the token can be wrapped inside a tag, false otherwise.
+   */
+  function isWrappable(token){
+      return isntTag(token) || isStartOfAtomicTag(token) || isVoidTag(token);
+  }
+
+  /**
+   * Creates a token that holds a string and key representation. The key is used for diffing
+   * comparisons and the string is used to recompose the document after the diff is complete.
+   *
+   * @param {string} currentWord The section of the document to create a token for.
+   *
+   * @return {Object} A token object with a string and key property.
+   */
+  function createToken(currentWord){
+      return {
+          string: currentWord,
+          key: getKeyForToken(currentWord)
+      };
+  }
+
+  /**
+   * A Match stores the information of a matching block. A matching block is a list of
+   * consecutive tokens that appear in both the before and after lists of tokens.
+   *
+   * @param {number} startInBefore The index of the first token in the list of before tokens.
+   * @param {number} startInAfter The index of the first token in the list of after tokens.
+   * @param {number} length The number of consecutive matching tokens in this block.
+   * @param {Segment} segment The segment where the match was found.
+   */
+  function Match(startInBefore, startInAfter, length, segment){
+      this.segment = segment;
+      this.length = length;
+
+      this.startInBefore = startInBefore + segment.beforeIndex;
+      this.startInAfter = startInAfter + segment.afterIndex;
+      this.endInBefore = this.startInBefore + this.length - 1;
+      this.endInAfter = this.startInAfter + this.length - 1;
+
+      this.segmentStartInBefore = startInBefore;
+      this.segmentStartInAfter = startInAfter;
+      this.segmentEndInBefore = (this.segmentStartInBefore + this.length) - 1;
+      this.segmentEndInAfter = (this.segmentStartInAfter + this.length) - 1;
+  }
+
+  /**
+   * Tokenizes a string of HTML.
+   *
+   * @param {string} html The string to tokenize.
+   *
+   * @return {Array.<string>} The list of tokens.
+   */
+  function htmlToTokens(html){
+      var mode = 'char';
+      var currentWord = '';
+      var currentAtomicTag = '';
+      var words = [];
+      for (var i = 0; i < html.length; i++){
+          var char = html[i];
+          switch (mode){
+              case 'tag':
+                  var atomicTag = isStartOfAtomicTag(currentWord);
+                  if (atomicTag){
+                      mode = 'atomic_tag';
+                      currentAtomicTag = atomicTag;
+                      currentWord += char;
+                  } else if (isStartofHTMLComment(currentWord)){
+                      mode = 'html_comment';
+                      currentWord += char;
+                  } else if (isEndOfTag(char)){
+                      currentWord += '>';
+                      words.push(createToken(currentWord));
+                      currentWord = '';
+                      if (isWhitespace(char)){
+                          mode = 'whitespace';
+                      } else {
+                          mode = 'char';
+                      }
+                  } else {
+                      currentWord += char;
+                  }
+                  break;
+              case 'atomic_tag':
+                  if (isEndOfTag(char) && isEndOfAtomicTag(currentWord, currentAtomicTag)){
+                      currentWord += '>';
+                      words.push(createToken(currentWord));
+                      currentWord = '';
+                      currentAtomicTag = '';
+                      mode = 'char';
+                  } else {
+                      currentWord += char;
+                  }
+                  break;
+              case 'html_comment':
+                  currentWord += char;
+                  if (isEndOfHTMLComment(currentWord)){
+                      currentWord = '';
+                      mode = 'char';
+                  }
+                  break;
+              case 'char':
+                  if (isStartOfTag(char)){
+                      if (currentWord){
+                          words.push(createToken(currentWord));
+                      }
+                      currentWord = '<';
+                      mode = 'tag';
+                  } else if (/\s/.test(char)){
+                      if (currentWord){
+                          words.push(createToken(currentWord));
+                      }
+                      currentWord = char;
+                      mode = 'whitespace';
+                  } else if (/[\w\d\#@]/.test(char)){
+                      currentWord += char;
+                  } else if (/&/.test(char)){
+                      if (currentWord){
+                          words.push(createToken(currentWord));
+                      }
+                      currentWord = char;
+                  } else {
+                      currentWord += char;
+                      words.push(createToken(currentWord));
+                      currentWord = '';
+                  }
+                  break;
+              case 'whitespace':
+                  if (isStartOfTag(char)){
+                      if (currentWord){
+                          words.push(createToken(currentWord));
+                      }
+                      currentWord = '<';
+                      mode = 'tag';
+                  } else if (isWhitespace(char)){
+                      currentWord += char;
+                  } else {
+                      if (currentWord){
+                          words.push(createToken(currentWord));
+                      }
+                      currentWord = char;
+                      mode = 'char';
+                  }
+                  break;
+              default:
+                  throw new Error('Unknown mode ' + mode);
+          }
       }
-  
-      return Match;
-  
-    })();
-  
-    html_to_tokens = function(html) {
-      var char, current_word, i, len, mode, words;
-      mode = 'char';
-      current_word = '';
-      words = [];
-      for (i = 0, len = html.length; i < len; i++) {
-        char = html[i];
-        switch (mode) {
-          case 'tag':
-            if (is_end_of_tag(char)) {
-              current_word += '>';
-              words.push(current_word);
-              current_word = '';
-              if (is_whitespace(char)) {
-                mode = 'whitespace';
-              } else {
-                mode = 'char';
-              }
-            } else {
-              current_word += char;
-            }
-            break;
-          case 'char':
-            if (is_start_of_tag(char)) {
-              if (current_word) {
-                words.push(current_word);
-              }
-              current_word = '<';
-              mode = 'tag';
-            } else if (/\s/.test(char)) {
-              if (current_word) {
-                words.push(current_word);
-              }
-              current_word = char;
-              mode = 'whitespace';
-            } else if (/[\w\#@]+/i.test(char)) {
-              current_word += char;
-            } else {
-              if (current_word) {
-                words.push(current_word);
-              }
-              current_word = char;
-            }
-            break;
-          case 'whitespace':
-            if (is_start_of_tag(char)) {
-              if (current_word) {
-                words.push(current_word);
-              }
-              current_word = '<';
-              mode = 'tag';
-            } else if (is_whitespace(char)) {
-              current_word += char;
-            } else {
-              if (current_word) {
-                words.push(current_word);
-              }
-              current_word = char;
-              mode = 'char';
-            }
-            break;
-          default:
-            throw new Error("Unknown mode " + mode);
-        }
-      }
-      if (current_word) {
-        words.push(current_word);
+      if (currentWord){
+          words.push(createToken(currentWord));
       }
       return words;
-    };
-  
-    find_match = function(before_tokens, after_tokens, index_of_before_locations_in_after_tokens, start_in_before, end_in_before, start_in_after, end_in_after) {
-      var best_match_in_after, best_match_in_before, best_match_length, i, index_in_after, index_in_before, j, len, locations_in_after, looking_for, match, match_length_at, new_match_length, new_match_length_at, ref, ref1;
-      best_match_in_before = start_in_before;
-      best_match_in_after = start_in_after;
-      best_match_length = 0;
-      match_length_at = {};
-      for (index_in_before = i = ref = start_in_before, ref1 = end_in_before; ref <= ref1 ? i < ref1 : i > ref1; index_in_before = ref <= ref1 ? ++i : --i) {
-        new_match_length_at = {};
-        looking_for = before_tokens[index_in_before];
-        locations_in_after = index_of_before_locations_in_after_tokens[looking_for];
-        for (j = 0, len = locations_in_after.length; j < len; j++) {
-          index_in_after = locations_in_after[j];
-          if (index_in_after < start_in_after) {
-            continue;
-          }
-          if (index_in_after >= end_in_after) {
-            break;
-          }
-          if (match_length_at[index_in_after - 1] == null) {
-            match_length_at[index_in_after - 1] = 0;
-          }
-          new_match_length = match_length_at[index_in_after - 1] + 1;
-          new_match_length_at[index_in_after] = new_match_length;
-          if (new_match_length > best_match_length) {
-            best_match_in_before = index_in_before - new_match_length + 1;
-            best_match_in_after = index_in_after - new_match_length + 1;
-            best_match_length = new_match_length;
-          }
-        }
-        match_length_at = new_match_length_at;
+  }
+
+  /**
+   * Creates a key that should be used to match tokens. This is useful, for example, if we want
+   * to consider two open tag tokens as equal, even if they don't have the same attributes. We
+   * use a key instead of overwriting the token because we may want to render the original string
+   * without losing the attributes.
+   *
+   * @param {string} token The token to create the key for.
+   *
+   * @return {string} The identifying key that should be used to match before and after tokens.
+   */
+  function getKeyForToken(token){
+      var tagName = /<([^\s>]+)[\s>]/.exec(token);
+      if (tagName){
+          return '<' + (tagName[1].toLowerCase()) + '>';
       }
-      if (best_match_length !== 0) {
-        match = new Match(best_match_in_before, best_match_in_after, best_match_length);
+      return token && token.replace(/(\s+|&nbsp;|&#160;)/g, ' ');
+  }
+
+  /**
+   * Creates a map from token key to an array of indices of locations of the matching token in
+   * the list of all tokens.
+   *
+   * @param {Array.<string>} tokens The list of tokens to be mapped.
+   *
+   * @return {Object} A mapping that can be used to search for tokens.
+   */
+  function createMap(tokens){
+      return tokens.reduce(function(map, token, index){
+          if (map[token.key]){
+              map[token.key].push(index);
+          } else {
+              map[token.key] = [index];
+          }
+          return map;
+      }, Object.create(null));
+  }
+
+  /**
+   * Compares two match objects to determine if the second match object comes before or after the
+   * first match object. Returns -1 if the m2 should come before m1. Returns 1 if m1 should come
+   * before m2. If the two matches criss-cross each other, a null is returned.
+   *
+   * @param {Match} m1 The first match object to compare.
+   * @param {Match} m2 The second match object to compare.
+   *
+   * @return {number} Returns -1 if the m2 should come before m1. Returns 1 if m1 should come
+   *    before m2. If the two matches criss-cross each other, 0 is returned.
+   */
+  function compareMatches(m1, m2){
+      if (m2.endInBefore < m1.startInBefore && m2.endInAfter < m1.startInAfter){
+          return -1;
+      } else if (m2.startInBefore > m1.endInBefore && m2.startInAfter > m1.endInAfter){
+          return 1;
+      } else {
+          return 0;
       }
-      return match;
-    };
-  
-    recursively_find_matching_blocks = function(before_tokens, after_tokens, index_of_before_locations_in_after_tokens, start_in_before, end_in_before, start_in_after, end_in_after, matching_blocks) {
+  }
+
+  /**
+   * A constructor for a binary search tree used to keep match objects in the proper order as
+   * they're found.
+   *
+   * @constructor
+   */
+  function MatchBinarySearchTree(){
+      this._root = null;
+  }
+
+  MatchBinarySearchTree.prototype = {
+      /**
+       * Adds matches to the binary search tree.
+       *
+       * @param {Match} value The match to add to the binary search tree.
+       */
+      add: function (value){
+          // Create the node to hold the match value.
+          var node = {
+              value: value,
+              left: null,
+              right: null
+          };
+
+          var current = this._root;
+          if(current){
+              while (true){
+                  // Determine if the match value should go to the left or right of the current
+                  // node.
+                  var position = compareMatches(current.value, value);
+                  if (position === -1){
+                      // The position of the match is to the left of this node.
+                      if (current.left){
+                          current = current.left;
+                      } else {
+                          current.left = node;
+                          break;
+                      }
+                  } else if (position === 1){
+                      // The position of the match is to the right of this node.
+                      if (current.right){
+                          current = current.right;
+                      } else {
+                          current.right = node;
+                          break;
+                      }
+                  } else {
+                      // If 0 was returned from compareMatches, that means the node cannot
+                      // be inserted because it overlaps an existing node.
+                      break;
+                  }
+              }
+          } else {
+              // If no nodes exist in the tree, make this the root node.
+              this._root = node;
+          }
+      },
+
+      /**
+       * Converts the binary search tree into an array using an in-order traversal.
+       *
+       * @return {Array.<Match>} An array containing the matches in the binary search tree.
+       */
+      toArray: function(){
+          function inOrder(node, nodes){
+              if (node){
+                  inOrder(node.left, nodes);
+                  nodes.push(node.value);
+                  inOrder(node.right, nodes);
+              }
+              return nodes;
+          }
+
+          return inOrder(this._root, []);
+      }
+  };
+
+
+  /**
+   * Finds and returns the best match between the before and after arrays contained in the segment
+   * provided.
+   *
+   * @param {Segment} segment The segment in which to look for a match.
+   *
+   * @return {Match} The best match.
+   */
+  function findBestMatch(segment){
+      var beforeTokens = segment.beforeTokens;
+      var afterMap = segment.afterMap;
+      var lastSpace = null;
+      var bestMatch = null;
+
+      // Iterate through the entirety of the beforeTokens to find the best match.
+      for (var beforeIndex = 0; beforeIndex < beforeTokens.length; beforeIndex++){
+          var lookBehind = false;
+
+          // If the current best match is longer than the remaining tokens, we can bail because we
+          // won't find a better match.
+          var remainingTokens = beforeTokens.length - beforeIndex;
+          if (bestMatch && remainingTokens < bestMatch.length){
+              break;
+          }
+
+          // If the current token is whitespace, make a note of it and move on. Trying to start a
+          // set of matches with whitespace is not efficient because it's too prevelant in most
+          // documents. Instead, if the next token yields a match, we'll see if the whitespace can
+          // be included in that match.
+          var beforeToken = beforeTokens[beforeIndex];
+          if (beforeToken.key === ' '){
+              lastSpace = beforeIndex;
+              continue;
+          }
+
+          // Check to see if we just skipped a space, if so, we'll ask getFullMatch to look behind
+          // by one token to see if it can include the whitespace.
+          if (lastSpace === beforeIndex - 1){
+              lookBehind = true;
+          }
+
+          // If the current token is not found in the afterTokens, it won't match and we can move
+          // on.
+          var afterTokenLocations = afterMap[beforeToken.key];
+          if(!afterTokenLocations){
+              continue;
+          }
+
+          // For each instance of the current token in afterTokens, let's see how big of a match
+          // we can build.
+          afterTokenLocations.forEach((afterIndex) => {
+              // getFullMatch will see how far the current token match will go in both
+              // beforeTokens and afterTokens.
+              var bestMatchLength = bestMatch ? bestMatch.length : 0;
+              var match = getFullMatch(
+                      segment, beforeIndex, afterIndex, bestMatchLength, lookBehind);
+
+              // If we got a new best match, we'll save it aside.
+              if (match && match.length > bestMatchLength){
+                  bestMatch = match;
+              }
+          });
+      }
+
+      return bestMatch;
+  }
+
+  /**
+   * Takes the start of a match, and expands it in the beforeTokens and afterTokens of the
+   * current segment as far as it can go.
+   *
+   * @param {Segment} segment The segment object to search within when expanding the match.
+   * @param {number} beforeStart The offset within beforeTokens to start looking.
+   * @param {number} afterStart The offset within afterTokens to start looking.
+   * @param {number} minLength The minimum length match that must be found.
+   * @param {boolean} lookBehind If true, attempt to match a whitespace token just before the
+   *    beforeStart and afterStart tokens.
+   *
+   * @return {Match} The full match.
+   */
+  function getFullMatch(segment, beforeStart, afterStart, minLength, lookBehind){
+      var beforeTokens = segment.beforeTokens;
+      var afterTokens = segment.afterTokens;
+
+      // If we already have a match that goes to the end of the document, no need to keep looking.
+      var minBeforeIndex = beforeStart + minLength;
+      var minAfterIndex = afterStart + minLength;
+      if(minBeforeIndex >= beforeTokens.length || minAfterIndex >= afterTokens.length){
+          return;
+      }
+
+      // If a minLength was provided, we can do a quick check to see if the tokens after that
+      // length match. If not, we won't be beating the previous best match, and we can bail out
+      // early.
+      if (minLength){
+          var nextBeforeWord = beforeTokens[minBeforeIndex].key;
+          var nextAfterWord = afterTokens[minAfterIndex].key;
+          if (nextBeforeWord !== nextAfterWord){
+              return;
+          }
+      }
+
+      // Extend the current match as far foward as it can go, without overflowing beforeTokens or
+      // afterTokens.
+      var searching = true;
+      var currentLength = 1;
+      var beforeIndex = beforeStart + currentLength;
+      var afterIndex = afterStart + currentLength;
+
+      while (searching && beforeIndex < beforeTokens.length && afterIndex < afterTokens.length){
+          var beforeWord = beforeTokens[beforeIndex].key;
+          var afterWord = afterTokens[afterIndex].key;
+          if (beforeWord === afterWord){
+              currentLength++;
+              beforeIndex = beforeStart + currentLength;
+              afterIndex = afterStart + currentLength;
+          } else {
+              searching = false;
+          }
+      }
+
+      // If we've been asked to look behind, it's because both beforeTokens and afterTokens may
+      // have a whitespace token just behind the current match that was previously ignored. If so,
+      // we'll expand the current match to include it.
+      if (lookBehind && beforeStart > 0 && afterStart > 0){
+          var prevBeforeKey = beforeTokens[beforeStart - 1].key;
+          var prevAfterKey = afterTokens[afterStart - 1].key;
+          if (prevBeforeKey === ' ' && prevAfterKey === ' '){
+              beforeStart--;
+              afterStart--;
+              currentLength++;
+          }
+      }
+
+      return new Match(beforeStart, afterStart, currentLength, segment);
+  }
+
+  /**
+   * Creates segment objects from the original document that can be used to restrict the area that
+   * findBestMatch and it's helper functions search to increase performance.
+   *
+   * @param {Array.<Token>} beforeTokens Tokens from the before document.
+   * @param {Array.<Token>} afterTokens Tokens from the after document.
+   * @param {number} beforeIndex The index within the before document where this segment begins.
+   * @param {number} afterIndex The index within the after document where this segment behinds.
+   *
+   * @return {Segment} The segment object.
+   */
+  function createSegment(beforeTokens, afterTokens, beforeIndex, afterIndex){
+      return {
+          beforeTokens: beforeTokens,
+          afterTokens: afterTokens,
+          beforeMap: createMap(beforeTokens),
+          afterMap: createMap(afterTokens),
+          beforeIndex: beforeIndex,
+          afterIndex: afterIndex
+      };
+  }
+
+  /**
+   * Finds all the matching blocks within the given segment in the before and after lists of
+   * tokens.
+   *
+   * @param {Segment} The segment that should be searched for matching blocks.
+   *
+   * @return {Array.<Match>} The list of matching blocks in this range.
+   */
+  function findMatchingBlocks(segment){
+      // Create a binary search tree to hold the matches we find in order.
+      var matches = new MatchBinarySearchTree();
       var match;
-      match = find_match(before_tokens, after_tokens, index_of_before_locations_in_after_tokens, start_in_before, end_in_before, start_in_after, end_in_after);
-      if (match != null) {
-        if (start_in_before < match.start_in_before && start_in_after < match.start_in_after) {
-          recursively_find_matching_blocks(before_tokens, after_tokens, index_of_before_locations_in_after_tokens, start_in_before, match.start_in_before, start_in_after, match.start_in_after, matching_blocks);
-        }
-        matching_blocks.push(match);
-        if (match.end_in_before <= end_in_before && match.end_in_after <= end_in_after) {
-          recursively_find_matching_blocks(before_tokens, after_tokens, index_of_before_locations_in_after_tokens, match.end_in_before + 1, end_in_before, match.end_in_after + 1, end_in_after, matching_blocks);
-        }
+      var segments = [segment];
+
+      // Each time the best match is found in a segment, zero, one or two new segments may be
+      // created from the parts of the original segment not included in the match. We will
+      // continue to iterate until all segments have been processed.
+      while(segments.length){
+          segment = segments.pop();
+          match = findBestMatch(segment);
+
+          if (match && match.length){
+              // If there's an unmatched area at the start of the segment, create a new segment
+              // from that area and throw it into the segments array to get processed.
+              if (match.segmentStartInBefore > 0 && match.segmentStartInAfter > 0){
+                  var leftBeforeTokens = segment.beforeTokens.slice(
+                          0, match.segmentStartInBefore);
+                  var leftAfterTokens = segment.afterTokens.slice(0, match.segmentStartInAfter);
+
+                  segments.push(createSegment(leftBeforeTokens, leftAfterTokens,
+                          segment.beforeIndex, segment.afterIndex));
+              }
+
+              // If there's an unmatched area at the end of the segment, create a new segment from that
+              // area and throw it into the segments array to get processed.
+              var rightBeforeTokens = segment.beforeTokens.slice(match.segmentEndInBefore + 1);
+              var rightAfterTokens = segment.afterTokens.slice(match.segmentEndInAfter + 1);
+              var rightBeforeIndex = segment.beforeIndex + match.segmentEndInBefore + 1;
+              var rightAfterIndex = segment.afterIndex + match.segmentEndInAfter + 1;
+
+              if (rightBeforeTokens.length && rightAfterTokens.length){
+                  segments.push(createSegment(rightBeforeTokens, rightAfterTokens,
+                          rightBeforeIndex, rightAfterIndex));
+              }
+
+              matches.add(match);
+          }
       }
-      return matching_blocks;
-    };
-  
-    create_index = function(p) {
-      var i, idx, index, len, ref, token;
-      if (p.find_these == null) {
-        throw new Error('params must have find_these key');
+
+      return matches.toArray();
+  }
+
+  /**
+   * Gets a list of operations required to transform the before list of tokens into the
+   * after list of tokens. An operation describes whether a particular list of consecutive
+   * tokens are equal, replaced, inserted, or deleted.
+   *
+   * @param {Array.<string>} beforeTokens The before list of tokens.
+   * @param {Array.<string>} afterTokens The after list of tokens.
+   *
+   * @return {Array.<Object>} The list of operations to transform the before list of
+   *      tokens into the after list of tokens, where each operation has the following
+   *      keys:
+   *      - {string} action One of {'replace', 'insert', 'delete', 'equal'}.
+   *      - {number} startInBefore The beginning of the range in the list of before tokens.
+   *      - {number} endInBefore The end of the range in the list of before tokens.
+   *      - {number} startInAfter The beginning of the range in the list of after tokens.
+   *      - {number} endInAfter The end of the range in the list of after tokens.
+   */
+  function calculateOperations(beforeTokens, afterTokens){
+      if (!beforeTokens) throw new Error('Missing beforeTokens');
+      if (!afterTokens) throw new Error('Missing afterTokens');
+
+      var positionInBefore = 0;
+      var positionInAfter = 0;
+      var operations = [];
+      var segment = createSegment(beforeTokens, afterTokens, 0, 0);
+      var matches = findMatchingBlocks(segment);
+      matches.push(new Match(beforeTokens.length, afterTokens.length, 0, segment));
+
+      for (var index = 0; index < matches.length; index++){
+          var match = matches[index];
+          var actionUpToMatchPositions = 'none';
+          if (positionInBefore === match.startInBefore){
+              if (positionInAfter !== match.startInAfter){
+                  actionUpToMatchPositions = 'insert';
+              }
+          } else {
+              actionUpToMatchPositions = 'delete';
+              if (positionInAfter !== match.startInAfter){
+                  actionUpToMatchPositions = 'replace';
+              }
+          }
+          if (actionUpToMatchPositions !== 'none'){
+              operations.push({
+                  action: actionUpToMatchPositions,
+                  startInBefore: positionInBefore,
+                  endInBefore: (actionUpToMatchPositions !== 'insert' ?
+                          match.startInBefore - 1 : null),
+                  startInAfter: positionInAfter,
+                  endInAfter: (actionUpToMatchPositions !== 'delete' ?
+                          match.startInAfter - 1 : null)
+              });
+          }
+          if (match.length !== 0){
+              operations.push({
+                  action: 'equal',
+                  startInBefore: match.startInBefore,
+                  endInBefore: match.endInBefore,
+                  startInAfter: match.startInAfter,
+                  endInAfter: match.endInAfter
+              });
+          }
+          positionInBefore = match.endInBefore + 1;
+          positionInAfter = match.endInAfter + 1;
       }
-      if (p.in_these == null) {
-        throw new Error('params must have in_these key');
+
+      var postProcessed = [];
+      var lastOp = {action: 'none'};
+
+      function isSingleWhitespace(op){
+          if (op.action !== 'equal'){
+              return false;
+          }
+          if (op.endInBefore - op.startInBefore !== 0){
+              return false;
+          }
+          return /^\s$/.test(beforeTokens.slice(op.startInBefore, op.endInBefore + 1));
       }
-      index = {};
-      ref = p.find_these;
-      for (i = 0, len = ref.length; i < len; i++) {
-        token = ref[i];
-        index[token] = [];
-        idx = p.in_these.indexOf(token);
-        while (idx !== -1) {
-          index[token].push(idx);
-          idx = p.in_these.indexOf(token, idx + 1);
-        }
+
+      for (var i = 0; i < operations.length; i++){
+          var op = operations[i];
+
+          if ((isSingleWhitespace(op) && lastOp.action === 'replace') ||
+                  (op.action === 'replace' && lastOp.action === 'replace')){
+              lastOp.endInBefore = op.endInBefore;
+              lastOp.endInAfter = op.endInAfter;
+          } else {
+              postProcessed.push(op);
+              lastOp = op;
+          }
       }
-      return index;
-    };
-  
-    find_matching_blocks = function(before_tokens, after_tokens) {
-      var index_of_before_locations_in_after_tokens, matching_blocks;
-      matching_blocks = [];
-      index_of_before_locations_in_after_tokens = create_index({
-        find_these: before_tokens,
-        in_these: after_tokens
+      return postProcessed;
+  }
+
+  /**
+   * A TokenWrapper provides a utility for grouping segments of tokens based on whether they're
+   * wrappable or not. A tag is considered wrappable if it is closed within the given set of
+   * tokens. For example, given the following tokens:
+   *
+   *      ['</b>', 'this', ' ', 'is', ' ', 'a', ' ', '<b>', 'test', '</b>', '!']
+   *
+   * The first '</b>' is not considered wrappable since the tag is not fully contained within the
+   * array of tokens. The '<b>', 'test', and '</b>' would be a part of the same wrappable segment
+   * since the entire bold tag is within the set of tokens.
+   *
+   * TokenWrapper has a method 'combine' which allows walking over the segments to wrap them in
+   * tags.
+   */
+  function TokenWrapper(tokens){
+      this.tokens = tokens;
+      this.notes = tokens.reduce(function(data, token, index){
+          data.notes.push({
+              isWrappable: isWrappable(token),
+              insertedTag: false
+          });
+
+          var tag = !isVoidTag(token) && isTag(token);
+          var lastEntry = data.tagStack[data.tagStack.length - 1];
+          if (tag){
+              if (lastEntry && '/' + lastEntry.tag === tag){
+                  data.notes[lastEntry.position].insertedTag = true;
+                  data.tagStack.pop();
+              } else {
+                  data.tagStack.push({
+                      tag: tag,
+                      position: index
+                  });
+              }
+          }
+          return data;
+      }, {notes: [], tagStack: []}).notes;
+  }
+
+  /**
+   * Wraps the contained tokens in tags based on output given by a map function. Each segment of
+   * tokens will be visited. A segment is a continuous run of either all wrappable
+   * tokens or unwrappable tokens. The given map function will be called with each segment of
+   * tokens and the resulting strings will be combined to form the wrapped HTML.
+   *
+   * @param {function(boolean, Array.<string>)} mapFn A function called with an array of tokens
+   *      and whether those tokens are wrappable or not. The result should be a string.
+   */
+  TokenWrapper.prototype.combine = function(mapFn, tagFn){
+      var notes = this.notes;
+      var tokens = this.tokens.slice();
+      var segments = tokens.reduce(function(data, token, index){
+          if (notes[index].insertedTag){
+              tokens[index] = tagFn(tokens[index]);
+          }
+          if (data.status === null){
+              data.status = notes[index].isWrappable;
+          }
+          var status = notes[index].isWrappable;
+          if (status !== data.status){
+              data.list.push({
+                  isWrappable: data.status,
+                  tokens: tokens.slice(data.lastIndex, index)
+              });
+              data.lastIndex = index;
+              data.status = status;
+          }
+          if (index === tokens.length - 1){
+              data.list.push({
+                  isWrappable: data.status,
+                  tokens: tokens.slice(data.lastIndex, index + 1)
+              });
+          }
+          return data;
+      }, {list: [], status: null, lastIndex: 0}).list;
+
+      return segments.map(mapFn).join('');
+  };
+
+  /**
+   * Wraps and concatenates a list of tokens with a tag. Does not wrap tag tokens,
+   * unless they are wrappable (i.e. void and atomic tags).
+   *
+   * @param {sting} tag The tag name of the wrapper tags.
+   * @param {Array.<string>} content The list of tokens to wrap.
+   * @param {string} dataPrefix (Optional) The prefix to use in data attributes.
+   * @param {string} className (Optional) The class name to include in the wrapper tag.
+   */
+  function wrap(tag, content, opIndex, dataPrefix, className){
+      var wrapper = new TokenWrapper(content);
+      dataPrefix = dataPrefix ? dataPrefix + '-' : '';
+      var attrs = ' data-' + dataPrefix + 'operation-index="' + opIndex + '"';
+      if (className){
+          attrs += ' class="' + className + '"';
+      }
+
+      return wrapper.combine(function(segment){
+          if (segment.isWrappable){
+              var val = segment.tokens.join('');
+              if (val.trim()){
+                  return '<' + tag + attrs + '>' + val + '</' + tag + '>';
+              }
+          } else {
+              return segment.tokens.join('');
+          }
+          return '';
+      }, function(openingTag){
+          var dataAttrs = ' data-diff-node="' + tag + '"';
+          dataAttrs += ' data-' + dataPrefix + 'operation-index="' + opIndex + '"';
+
+          return openingTag.replace(/>\s*$/, dataAttrs + '$&');
       });
-      return recursively_find_matching_blocks(before_tokens, after_tokens, index_of_before_locations_in_after_tokens, 0, before_tokens.length, 0, after_tokens.length, matching_blocks);
-    };
-  
-    calculate_operations = function(before_tokens, after_tokens) {
-      var action_map, action_up_to_match_positions, i, index, is_single_whitespace, j, last_op, len, len1, match, match_starts_at_current_position_in_after, match_starts_at_current_position_in_before, matches, op, operations, position_in_after, position_in_before, post_processed;
-      if (before_tokens == null) {
-        throw new Error('before_tokens?');
-      }
-      if (after_tokens == null) {
-        throw new Error('after_tokens?');
-      }
-      position_in_before = position_in_after = 0;
-      operations = [];
-      action_map = {
-        'false,false': 'replace',
-        'true,false': 'insert',
-        'false,true': 'delete',
-        'true,true': 'none'
-      };
-      matches = find_matching_blocks(before_tokens, after_tokens);
-      matches.push(new Match(before_tokens.length, after_tokens.length, 0));
-      for (index = i = 0, len = matches.length; i < len; index = ++i) {
-        match = matches[index];
-        match_starts_at_current_position_in_before = position_in_before === match.start_in_before;
-        match_starts_at_current_position_in_after = position_in_after === match.start_in_after;
-        action_up_to_match_positions = action_map[[match_starts_at_current_position_in_before, match_starts_at_current_position_in_after].toString()];
-        if (action_up_to_match_positions !== 'none') {
-          operations.push({
-            action: action_up_to_match_positions,
-            start_in_before: position_in_before,
-            end_in_before: (action_up_to_match_positions !== 'insert' ? match.start_in_before - 1 : void 0),
-            start_in_after: position_in_after,
-            end_in_after: (action_up_to_match_positions !== 'delete' ? match.start_in_after - 1 : void 0)
-          });
-        }
-        if (match.length !== 0) {
-          operations.push({
-            action: 'equal',
-            start_in_before: match.start_in_before,
-            end_in_before: match.end_in_before,
-            start_in_after: match.start_in_after,
-            end_in_after: match.end_in_after
-          });
-        }
-        position_in_before = match.end_in_before + 1;
-        position_in_after = match.end_in_after + 1;
-      }
-      post_processed = [];
-      last_op = {
-        action: 'none'
-      };
-      is_single_whitespace = function(op) {
-        if (op.action !== 'equal') {
-          return false;
-        }
-        if (op.end_in_before - op.start_in_before !== 0) {
-          return false;
-        }
-        return /^\s$/.test(before_tokens.slice(op.start_in_before, +op.end_in_before + 1 || 9e9));
-      };
-      for (j = 0, len1 = operations.length; j < len1; j++) {
-        op = operations[j];
-        if (((is_single_whitespace(op)) && last_op.action === 'replace') || (op.action === 'replace' && last_op.action === 'replace')) {
-          last_op.end_in_before = op.end_in_before;
-          last_op.end_in_after = op.end_in_after;
-        } else {
-          post_processed.push(op);
-          last_op = op;
-        }
-      }
-      return post_processed;
-    };
-  
-    consecutive_where = function(start, content, predicate) {
-      var answer, i, index, last_matching_index, len, token;
-      content = content.slice(start, +content.length + 1 || 9e9);
-      last_matching_index = void 0;
-      for (index = i = 0, len = content.length; i < len; index = ++i) {
-        token = content[index];
-        answer = predicate(token);
-        if (answer === true) {
-          last_matching_index = index;
-        }
-        if (answer === false) {
-          break;
-        }
-      }
-      if (last_matching_index != null) {
-        return content.slice(0, +last_matching_index + 1 || 9e9);
-      }
-      return [];
-    };
-  
-    wrap = function(tag, content) {
-      var length, non_tags, position, rendering, tags;
-      rendering = '';
-      position = 0;
-      length = content.length;
-      while (true) {
-        if (position >= length) {
-          break;
-        }
-        non_tags = consecutive_where(position, content, isnt_tag);
-        position += non_tags.length;
-        if (non_tags.length !== 0) {
-          rendering += "<" + tag + ">" + (non_tags.join('')) + "</" + tag + ">";
-        }
-        if (position >= length) {
-          break;
-        }
-        tags = consecutive_where(position, content, is_tag);
-        position += tags.length;
-        rendering += tags.join('');
-      }
-      return rendering;
-    };
-  
-    op_map = {
-      equal: function(op, before_tokens, after_tokens) {
-        return before_tokens.slice(op.start_in_before, +op.end_in_before + 1 || 9e9).join('');
+  }
+
+  /**
+   * OPS.equal/insert/delete/replace are functions that render an operation into
+   * HTML content.
+   *
+   * @param {Object} op The operation that applies to a prticular list of tokens. Has the
+   *      following keys:
+   *      - {string} action One of ['replace', 'insert', 'delete', 'equal'].
+   *      - {number} startInBefore The beginning of the range in the list of before tokens.
+   *      - {number} endInBefore The end of the range in the list of before tokens.
+   *      - {number} startInAfter The beginning of the range in the list of after tokens.
+   *      - {number} endInAfter The end of the range in the list of after tokens.
+   * @param {Array.<string>} beforeTokens The before list of tokens.
+   * @param {Array.<string>} afterTokens The after list of tokens.
+   * @param {number} opIndex The index into the list of operations that identifies the change to
+   *      be rendered. This is used to mark wrapped HTML as part of the same operation.
+   * @param {string} dataPrefix (Optional) The prefix to use in data attributes.
+   * @param {string} className (Optional) The class name to include in the wrapper tag.
+   *
+   * @return {string} The rendering of that operation.
+   */
+  var OPS = {
+      'equal': function(op, beforeTokens, afterTokens, opIndex, dataPrefix, className){
+          var tokens = afterTokens.slice(op.startInAfter, op.endInAfter + 1);
+          return tokens.reduce(function(prev, curr){
+              return prev + curr.string;
+          }, '');
       },
-      insert: function(op, before_tokens, after_tokens) {
-        var val;
-        val = after_tokens.slice(op.start_in_after, +op.end_in_after + 1 || 9e9);
-        return wrap('ins', val);
+      'insert': function(op, beforeTokens, afterTokens, opIndex, dataPrefix, className){
+          var tokens = afterTokens.slice(op.startInAfter, op.endInAfter + 1);
+          var val = tokens.map(function(token){
+              return token.string;
+          });
+          return wrap('ins', val, opIndex, dataPrefix, className);
       },
-      "delete": function(op, before_tokens, after_tokens) {
-        var val;
-        val = before_tokens.slice(op.start_in_before, +op.end_in_before + 1 || 9e9);
-        return wrap('del', val);
+      'delete': function(op, beforeTokens, afterTokens, opIndex, dataPrefix, className){
+          var tokens = beforeTokens.slice(op.startInBefore, op.endInBefore + 1);
+          var val = tokens.map(function(token){
+              return token.string;
+          });
+          return wrap('del', val, opIndex, dataPrefix, className);
+      },
+      'replace': function(){
+          return OPS['delete'].apply(null, arguments) + OPS['insert'].apply(null, arguments);
       }
-    };
-  
-    op_map.replace = function(op, before_tokens, after_tokens) {
-      return (op_map["delete"](op, before_tokens, after_tokens)) + (op_map.insert(op, before_tokens, after_tokens));
-    };
-  
-    render_operations = function(before_tokens, after_tokens, operations) {
-      var i, len, op, rendering;
-      rendering = '';
-      for (i = 0, len = operations.length; i < len; i++) {
-        op = operations[i];
-        rendering += op_map[op.action](op, before_tokens, after_tokens);
-      }
-      return rendering;
-    };
-  
-    tdiff = function(before, after) {
-      var ops;
-      if(!before || !after) return '';
+  };
+
+  /**
+   * Renders a list of operations into HTML content. The result is the combined version
+   * of the before and after tokens with the differences wrapped in tags.
+   *
+   * @param {Array.<string>} beforeTokens The before list of tokens.
+   * @param {Array.<string>} afterTokens The after list of tokens.
+   * @param {Array.<Object>} operations The list of operations to transform the before
+   *      list of tokens into the after list of tokens, where each operation has the
+   *      following keys:
+   *      - {string} action One of {'replace', 'insert', 'delete', 'equal'}.
+   *      - {number} startInBefore The beginning of the range in the list of before tokens.
+   *      - {number} endInBefore The end of the range in the list of before tokens.
+   *      - {number} startInAfter The beginning of the range in the list of after tokens.
+   *      - {number} endInAfter The end of the range in the list of after tokens.
+   * @param {string} dataPrefix (Optional) The prefix to use in data attributes.
+   * @param {string} className (Optional) The class name to include in the wrapper tag.
+   *
+   * @return {string} The rendering of the list of operations.
+   */
+  function renderOperations(beforeTokens, afterTokens, operations, dataPrefix, className){
+      return operations.reduce(function(rendering, op, index){
+          return rendering + OPS[op.action](
+                  op, beforeTokens, afterTokens, index, dataPrefix, className);
+      }, '');
+  }
+
+  /**
+   * Compares two pieces of HTML content and returns the combined content with differences
+   * wrapped in <ins> and <del> tags.
+   *
+   * @param {string} before The HTML content before the changes.
+   * @param {string} after The HTML content after the changes.
+   * @param {string} className (Optional) The class attribute to include in <ins> and <del> tags.
+   * @param {string} dataPrefix (Optional) The data prefix to use for data attributes. The
+   *      operation index data attribute will be named `data-${dataPrefix-}operation-index`.
+   *
+   * @return {string} The combined HTML content with differences wrapped in <ins> and <del> tags.
+   */
+  function tdiff(before, after, className, dataPrefix){
       if (before === after) return before;
-      before = html_to_tokens(before);
-      after = html_to_tokens(after);
-      ops = calculate_operations(before, after);
-      return render_operations(before, after, ops);
-    };
-  
-    tdiff.html_to_tokens = html_to_tokens;
-  
-    tdiff.find_matching_blocks = find_matching_blocks;
-  
-    find_matching_blocks.find_match = find_match;
-  
-    find_matching_blocks.create_index = create_index;
-  
-    tdiff.calculate_operations = calculate_operations;
-  
-    tdiff.render_operations = render_operations;
-  
-    module.exports = tdiff;
-  
-  }).call(this);
-  
+      if(!before || !after) return '';
+
+      before = htmlToTokens(before);
+      after = htmlToTokens(after);
+      var ops = calculateOperations(before, after);
+      return renderOperations(before, after, ops, dataPrefix, className);
+  }
+
+  tdiff.htmlToTokens = htmlToTokens;
+  tdiff.findMatchingBlocks = findMatchingBlocks;
+  findMatchingBlocks.findBestMatch = findBestMatch;
+  findMatchingBlocks.createMap = createMap;
+  findMatchingBlocks.createToken = createToken;
+  findMatchingBlocks.createSegment = createSegment;
+  findMatchingBlocks.getKeyForToken = getKeyForToken;
+  tdiff.calculateOperations = calculateOperations;
+  tdiff.renderOperations = renderOperations;
+
+  module.exports = tdiff;
+}).call(this);

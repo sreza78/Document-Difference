@@ -6,11 +6,18 @@ class DocumentDifference extends Component {
 
     constructor(props){
       super(props);
+      this.state = {text: ""};
+    }
+
+    componentDidMount() {
+      this.setState({
+        text : tdiff(this.props.oldDocument, this.props.newDocument)
+      })
     }
   
     render () {
       return (
-        <main dir="rtl" dangerouslySetInnerHTML={{ __html: tdiff(this.props.oldDocument, this.props.newDocument) }}></main>
+        <main dir="rtl" dangerouslySetInnerHTML={{ __html: this.state.text }}></main>
       );
     }
   }
