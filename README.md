@@ -4,7 +4,7 @@
 
 ## Install
 ```bash
-yarn add git+ssh://git@github.com:sreza78/Document-Difference.git
+yarn add git+ssh://git@github.com/sreza78/Document-Difference.git
 ```
 
 ## Usage
